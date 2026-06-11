@@ -1,0 +1,311 @@
+% ============================================================
+% CS 446 Assignment 4 Report
+% ============================================================
+
+\begin{filecontents*}{references.bib}
+@online{docker_docs,
+  title        = {Docker documentation},
+  organization = {Docker},
+  url          = {https://docs.docker.com/},
+  urldate      = {2026-02-16}
+}
+
+@online{docker_compose_docs,
+  title        = {Docker Compose documentation},
+  organization = {Docker},
+  url          = {https://docs.docker.com/compose/},
+  urldate      = {2026-02-16}
+}
+
+@online{kubernetes_docs,
+  title        = {Kubernetes documentation},
+  organization = {Kubernetes},
+  url          = {https://kubernetes.io/docs/},
+  urldate      = {2026-02-16}
+}
+
+@online{flask_docs,
+  title        = {Flask documentation},
+  organization = {Pallets},
+  url          = {https://flask.palletsprojects.com/},
+  urldate      = {2026-02-16}
+}
+
+@online{redis_docs,
+  title        = {Redis documentation},
+  organization = {Redis},
+  url          = {https://redis.io/docs/},
+  urldate      = {2026-02-16}
+}
+
+@online{sklearn_persistence,
+  title        = {Model persistence},
+  organization = {scikit-learn},
+  url          = {https://scikit-learn.org/stable/model_persistence.html},
+  urldate      = {2026-02-16}
+}
+\end{filecontents*}
+
+\documentclass[11pt]{amsart}
+
+% Margins
+\usepackage[headheight=65pt]{geometry}
+\geometry{
+  top=1 in,
+  inner=1 in,
+  outer=1 in,
+  bottom=1 in,
+  headheight=3ex,
+  headsep=2ex,
+}
+
+% Personal info
+\def \fname{Jason}
+\def \lname{Stys}
+\def \partner{Partner Name}
+\def \class{CS 446-01}
+\def \assgn{Assignment 4}
+
+% Header
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\lhead{\fname\ \lname}
+\fancyfoot{}
+\chead{\assgn}
+\rhead{Page \thepage}
+\renewcommand{\headrulewidth}{2pt}
+
+\usepackage{amssymb,amsmath,amsthm,amscd,mathrsfs,graphicx,color}
+\usepackage[active]{srcltx}
+\usepackage{mathpazo}
+\usepackage{setspace}\doublespacing
+\usepackage{hyperref}
+\usepackage[usenames,dvipsnames]{xcolor}
+\usepackage[style=science,sortcites=true,sorting=nyt,backend=biber]{biblatex}
+\hypersetup{colorlinks=true,citecolor=ForestGreen,linkcolor=Maroon,urlcolor=NavyBlue}
+
+% Code listings
+\usepackage{listings}
+\definecolor{dkgreen}{rgb}{0,0.6,0}
+\definecolor{gray}{rgb}{0.5,0.5,0.5}
+\definecolor{mauve}{rgb}{0.58,0,0.82}
+
+\lstset{
+  frame=tb,
+  aboveskip=3mm,
+  belowskip=3mm,
+  showstringspaces=false,
+  columns=flexible,
+  basicstyle={\small\ttfamily},
+  numbers=none,
+  numberstyle=\tiny\color{gray},
+  keywordstyle=\color{blue},
+  commentstyle=\color{dkgreen},
+  stringstyle=\color{mauve},
+  breaklines=true,
+  breakatwhitespace=true,
+  tabsize=2
+}
+
+% YAML support for listings
+\lstdefinelanguage{yaml}{
+  keywords={true,false,null,yes,no},
+  keywordstyle=\color{blue},
+  basicstyle=\small\ttfamily,
+  comment=[l]{\#},
+  commentstyle=\color{dkgreen},
+  stringstyle=\color{mauve},
+  morestring=[b]\",
+  morestring=[b]',
+  sensitive=false
+}
+
+
+\addbibresource{references.bib}
+
+% Begin Document
+\begin{document}
+
+\author[\lname]{\fname\ \lname \and \partner}
+\date{\today}
+\title[\assgn]{\assgn \\ \ \\\class}
+\maketitle
+\tableofcontents
+
+\newpage
+
+\section{Abstract}
+This project containerizes a machine learning prediction service and makes it portable across machines. A Flask web application serves predictions from a trained Iris classifier and a Redis service stores a persistent prediction counter. Docker builds a reproducible image and Docker Compose runs the full stack with a custom network, health checks, and a named volume. Kubernetes manifests translate the same design into deployments and services with probes and replica support.
+
+\section{Introduction}
+Machine learning applications depend on many libraries and system components. When versions differ between machines the application can fail even when the code does not change. Containerization addresses this by packaging the application, its dependencies, and its runtime configuration into a single image that runs consistently across environments. Lecture material highlights environment drift and dependency conflicts as common causes of the it works on my machine problem. Containers reduce these risks by isolating the process and pinning the runtime stack in an image.
+
+The goals for this assignment are to build a production minded container image, orchestrate a multi service stack with Docker Compose, and translate the same deployment to Kubernetes. The application includes a web user interface for entering Iris measurements, an inference path that returns the predicted class, and a Redis backed counter that persists across restarts.
+
+\section{Code and configuration explanation}
+
+\subsection{Dockerfile}
+The Dockerfile uses a multi stage build to keep the runtime image lean while still installing large machine learning libraries. The build has two stages.
+
+\begin{itemize}
+  \item The builder stage creates a virtual environment, installs pinned dependencies, and trains the Iris model to produce the serialized model file.
+  \item The runtime stage starts from a fresh slim base image and copies only the virtual environment, the model file, the templates, and the Flask application.
+\end{itemize}
+
+Key lines and their purpose are summarized below.
+
+\begin{enumerate}
+  \item The first \texttt{FROM} selects a slim Python base image for the builder stage.
+  \item A dedicated user is created so the container can run without root privileges.
+  \item A virtual environment is created and all requirements are installed into it.
+  \item The training script runs during the build and writes \texttt{iris\_model.pkl}.
+  \item The second \texttt{FROM} starts a fresh runtime stage that reuses the same slim base image.
+  \item The virtual environment and model artifact are copied from the builder stage into the runtime stage.
+  \item Application files are copied into \texttt{/app} and ownership is set for the non root user.
+  \item A health check calls the application health endpoint so an orchestrator can detect failure.
+  \item The container runs the Flask application as the non root user on port 5000.
+\end{enumerate}
+
+\subsection{Docker Compose}
+Docker Compose defines two services that share a private bridge network.
+
+\begin{itemize}
+  \item The web application service builds from the Dockerfile, maps host port 5000, and sets \texttt{REDIS\_HOST} so the app can reach Redis by service name.
+  \item The Redis service uses the \texttt{redis:alpine} image and stores its data in a named volume so state persists across restarts.
+\end{itemize}
+
+Production hardening is implemented through health checks and startup ordering. Redis uses \texttt{redis-cli ping} and the web application uses \texttt{curl} against the health route. The web application depends on Redis with a healthy condition, which prevents the app from starting before Redis is ready.
+
+\subsection{Kubernetes manifests}
+Kubernetes resources mirror the Compose design.
+
+\begin{itemize}
+  \item A Redis deployment runs one replica and a ClusterIP service exposes port 6379 inside the cluster.
+  \item A web application deployment runs two replicas and sets the \texttt{REDIS\_HOST} environment variable to the Redis service name.
+  \item Liveness and readiness probes call the health route so Kubernetes can restart unhealthy pods and only route traffic to ready pods.
+  \item A NodePort service exposes the web application on port 30500 for external access.
+\end{itemize}
+
+\section{Results}
+
+\subsection{Docker Compose deployment evidence}
+Figure \ref{fig:composeup} shows a successful stack startup command. Figure \ref{fig:composeps} shows both containers running and healthy.
+
+\begin{figure}[!h]
+  \centering
+  \includegraphics[width=\textwidth]{figures/compose_up_build.png}
+  \caption{Docker compose up build with successful service startup.}
+  \label{fig:composeup}
+\end{figure}
+
+\begin{figure}[!h]
+  \centering
+  \includegraphics[width=\textwidth]{figures/compose_ps.png}
+  \caption{Docker compose ps showing both services running and healthy.}
+  \label{fig:composeps}
+\end{figure}
+
+\subsection{Web application evidence}
+Figure \ref{fig:webform} shows the input form used to submit Iris measurements. Figure \ref{fig:webresult} shows a successful prediction and the total prediction count.
+
+\begin{figure}[!h]
+  \centering
+  \includegraphics[width=\textwidth]{figures/web_form.png}
+  \caption{Web application input form.}
+  \label{fig:webform}
+\end{figure}
+
+\begin{figure}[!h]
+  \centering
+  \includegraphics[width=\textwidth]{figures/prediction_result.png}
+  \caption{Prediction result page with predicted species and counter value.}
+  \label{fig:webresult}
+\end{figure}
+
+\subsection{Persistence evidence}
+The prediction counter persists because Redis data is stored in a named volume. After stopping and starting the stack, new predictions continue from the prior count. Figure \ref{fig:persist} shows a continued counter value after restart.
+
+\begin{figure}[!h]
+  \centering
+  \includegraphics[width=\textwidth]{figures/prediction_persistence.png}
+  \caption{Prediction counter continues after a container restart due to Redis volume persistence.}
+  \label{fig:persist}
+\end{figure}
+
+\subsection{Registry evidence}
+Figure \ref{fig:dockerhub} shows the pushed image listed in a Docker Hub repository.
+
+\begin{figure}[!h]
+  \centering
+  \includegraphics[width=\textwidth]{figures/dockerhub_repo.png}
+  \caption{Docker Hub repository page showing the pushed image tag.}
+  \label{fig:dockerhub}
+\end{figure}
+
+\subsection{Kubernetes evidence}
+Figure \ref{fig:k8s} shows the cluster resources after applying the manifests, including deployments, services, and pods.
+
+\begin{figure}[!h]
+  \centering
+  \includegraphics[width=\textwidth]{figures/kubectl_get_all.png}
+  \caption{kubectl get all showing deployments, services, and pods running.}
+  \label{fig:k8s}
+\end{figure}
+
+\section{Discussion}
+
+Docker Compose is effective for multi service development because it captures the full stack in a single configuration file. It standardizes ports, environment variables, networks, and persistent storage. It also provides repeatable commands for bringing the stack up and down, which improves team consistency during testing.
+
+Containerization improves machine learning reproducibility by fixing the execution environment. The Dockerfile pins dependency versions in \texttt{requirements.txt} and bundles the application code with the trained model artifact. This approach removes reliance on global packages and reduces environment drift, which is emphasized in the course material about containerization.
+
+The multi stage build reduces the runtime image size by discarding build only layers and temporary tooling. In this project the final image is about 656 MB while the builder stage can exceed a gigabyte when it includes package caches and build layers. A smaller runtime image lowers storage and transfer costs, reduces cold start time, and shrinks the attack surface by limiting included components.
+
+Including the model file inside the image simplifies deployment because the service always starts with a known model version. The trade off is that updating the model requires rebuilding and redeploying the image. In production, a model can also be provided through a volume mount, a model registry pull step, or a startup download from object storage, which can support faster model iteration.
+
+Challenges in this work included aligning dependency versions, ensuring Redis readiness before app startup, and confirming that health checks reported stable status. These were addressed by pinning compatible Flask and Werkzeug versions, using service health checks, and setting a dependency condition so the web application starts only after Redis is healthy.
+
+\section{Conclusion}
+This assignment produced a portable machine learning prediction service that runs as a multi service stack. Docker created a reproducible image and Docker Compose provided orchestration with health checks, networking isolation, and persistent storage. Kubernetes manifests extended the same design with deployments, services, and probes to support self healing and scaling. The project reinforced how containerization improves reliability and reproducibility for machine learning systems.
+
+\section{References}
+\nocite{docker_docs,docker_compose_docs,kubernetes_docs,flask_docs,redis_docs,sklearn_persistence}
+\printbibliography
+
+\newpage
+\appendix
+\section{Appendix source files}
+
+\subsection{Dockerfile}
+\lstinputlisting[language=bash]{src/ml-app/Dockerfile}
+
+\subsection{Docker Compose file}
+\lstinputlisting[language=yaml]{src/ml-app/docker-compose.yml}
+
+\subsection{Flask application}
+\lstinputlisting[language=Python]{src/ml-app/app.py}
+
+\subsection{Model training script}
+\lstinputlisting[language=Python]{src/ml-app/train_model.py}
+
+\subsection{Requirements file}
+\lstinputlisting[language=bash]{src/ml-app/requirements.txt}
+
+\subsection{HTML template index}
+\lstinputlisting[language=HTML]{src/ml-app/templates/index.html}
+
+\subsection{HTML template result}
+\lstinputlisting[language=HTML]{src/ml-app/templates/result.html}
+
+\subsection{Kubernetes redis deployment}
+\lstinputlisting[language=yaml]{src/k8s/redis-deployment.yaml}
+
+\subsection{Kubernetes redis service}
+\lstinputlisting[language=yaml]{src/k8s/redis-service.yaml}
+
+\subsection{Kubernetes web application deployment}
+\lstinputlisting[language=yaml]{src/k8s/webapp-deployment.yaml}
+
+\subsection{Kubernetes web application service}
+\lstinputlisting[language=yaml]{src/k8s/webapp-service.yaml}
+
+\end{document}
